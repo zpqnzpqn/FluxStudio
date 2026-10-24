@@ -163,6 +163,9 @@ public struct InpaintCanvasView: View {
     @State private var selectedModel: FluxModelSpec = ModelRegistry.allModels.first { $0.id == "fill-dev" }!
     @State private var currentDrawingPoints: [CGPoint] = []
     @State private var isTargetedForDrop: Bool = false
+    @State private var lastSavedURL: URL?
+    @State private var showConsoleLogs: Bool = false
+    @State private var toastMessage: String? = nil
 
     public init(state: CanvasState) {
         self.state = state
@@ -247,6 +250,7 @@ public struct InpaintCanvasView: View {
                                 Button("複製HEX") {
                                     NSPasteboard.general.clearContents()
                                     NSPasteboard.general.setString(state.pickedColorHex, forType: .string)
+                                    showToast("📋 已複製色碼 \(state.pickedColorHex)")
                                 }
                                 .font(.caption2)
                             }
@@ -299,6 +303,48 @@ public struct InpaintCanvasView: View {
                     .padding(6)
                 }
 
+                // 另存修圖成品按鈕區（當有底圖/修圖結果時顯示）
+                if state.baseImage != nil {
+                    GroupBox(label: Text("💾 導出與儲存")) {
+                        VStack(spacing: 8) {
+                            HStack(spacing: 8) {
+                                Button(action: saveAs) {
+                                    Label("另存新檔...", systemImage: "square.and.arrow.down.on.square")
+                                        .frame(maxWidth: .infinity)
+                                }
+                                .buttonStyle(.bordered)
+
+                                Button(action: openInFinder) {
+                                    Label("開啟資料夾", systemImage: "folder")
+                                }
+                                .buttonStyle(.bordered)
+                            }
+
+                            HStack(spacing: 8) {
+                                Button(action: copyImageToClipboard) {
+                                    Label("複製成品", systemImage: "doc.on.doc")
+                                        .frame(maxWidth: .infinity)
+                                }
+                                .buttonStyle(.bordered)
+
+                                Button(action: openInPreview) {
+                                    Label("系統預覽", systemImage: "eye")
+                                        .frame(maxWidth: .infinity)
+                                }
+                                .buttonStyle(.bordered)
+                            }
+
+                            if let url = lastSavedURL {
+                                Text("最近存檔：\(url.lastPathComponent)")
+                                    .font(.caption2)
+                                    .foregroundColor(.secondary)
+                                    .lineLimit(1)
+                            }
+                        }
+                        .padding(6)
+                    }
+                }
+
                 Spacer()
 
                 // 啟動重繪按鈕
@@ -314,20 +360,72 @@ public struct InpaintCanvasView: View {
 
                 if engine.activeProcess != nil {
                     Button(action: { engine.cancel() }) {
-                        Text("中斷修圖")
+                        Label("中斷修圖", systemImage: "xmark.circle")
                             .foregroundColor(.red)
                     }
                     .frame(maxWidth: .infinity)
                 }
 
-                if case .running(let step, let total, let msg) = engine.status {
-                    VStack(alignment: .leading, spacing: 4) {
-                        ProgressView(value: Double(step), total: Double(total))
-                        Text(msg).font(.caption2).foregroundColor(.secondary)
+                // 即時推論進度展示
+                if case .running(let prog) = engine.status {
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack {
+                            Text(prog.phaseTitle)
+                                .font(.subheadline)
+                                .bold()
+                                .foregroundColor(.accentColor)
+                            Spacer()
+                            Text("\(Int(prog.percent * 100))%")
+                                .font(.subheadline)
+                                .bold()
+                                .monospacedDigit()
+                        }
+
+                        ProgressView(value: prog.percent, total: 1.0)
+                            .progressViewStyle(.linear)
+
+                        Text(prog.detailMessage)
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+
+                        Button(action: { showConsoleLogs.toggle() }) {
+                            HStack {
+                                Text(showConsoleLogs ? "隱藏推論日誌" : "查看即時推論日誌")
+                                Image(systemName: showConsoleLogs ? "chevron.up" : "chevron.down")
+                            }
+                            .font(.caption2)
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundColor(.blue)
+
+                        if showConsoleLogs {
+                            ScrollView {
+                                Text(engine.consoleLogs)
+                                    .font(.system(.caption2, design: .monospaced))
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                            .frame(height: 70)
+                            .background(Color.black.opacity(0.85))
+                            .foregroundColor(.green)
+                            .cornerRadius(6)
+                        }
                     }
+                    .padding(8)
+                    .background(Color.secondary.opacity(0.1))
+                    .cornerRadius(8)
+                }
+
+                if let toast = toastMessage {
+                    Text(toast)
+                        .font(.caption)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 4)
+                        .background(Color.black.opacity(0.75))
+                        .foregroundColor(.white)
+                        .cornerRadius(12)
                 }
             }
-            .frame(minWidth: 320, maxWidth: 380)
+            .frame(minWidth: 330, maxWidth: 390)
             .padding()
 
             // 右側畫布主視圖
@@ -397,6 +495,9 @@ public struct InpaintCanvasView: View {
                         Text("將圖片拖曳至此，或點選左側「載入原圖」")
                             .font(.title3)
                             .foregroundColor(.secondary)
+                        Text("修圖後支援另存新檔、在 Finder 開啟與複製")
+                            .font(.caption)
+                            .foregroundColor(.secondary.opacity(0.8))
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .overlay(
@@ -462,6 +563,7 @@ public struct InpaintCanvasView: View {
             state.undoStack.removeAll()
             state.redoStack.removeAll()
             state.resetTransform()
+            lastSavedURL = nil
         }
     }
 
@@ -477,6 +579,7 @@ public struct InpaintCanvasView: View {
                 self.state.undoStack.removeAll()
                 self.state.redoStack.removeAll()
                 self.state.resetTransform()
+                self.lastSavedURL = nil
             }
         }
         return true
@@ -484,17 +587,23 @@ public struct InpaintCanvasView: View {
 
     private func startInpaint() {
         guard let base = state.baseImage else { return }
+
+        // 自動備份與輸出目錄
+        let picturesURL = FileManager.default.urls(for: .picturesDirectory, in: .userDomainMask).first!
+        let fluxDir = picturesURL.appendingPathComponent("FluxStudio")
+        try? FileManager.default.createDirectory(at: fluxDir, withIntermediateDirectories: true)
+
         let tempDir = FileManager.default.temporaryDirectory
         let baseFile = tempDir.appendingPathComponent("input_\(UUID().uuidString).png")
         let maskFile = tempDir.appendingPathComponent("mask_\(UUID().uuidString).png")
-        let outFile = tempDir.appendingPathComponent("out_\(UUID().uuidString).png")
+        let outFile = fluxDir.appendingPathComponent("Inpaint_\(selectedModel.id)_\(Int(Date().timeIntervalSince1970)).png")
 
-        // 儲存 baseImage
+        // 儲存 baseImage 供 CLI 輸入
         if let tiff = base.tiffRepresentation, let rep = NSBitmapImageRep(data: tiff), let data = rep.representation(using: .png, properties: [:]) {
             try? data.write(to: baseFile)
         }
 
-        // 儲存 maskImage
+        // 儲存 maskImage 供 CLI 輸入
         if let maskImg = state.exportMaskImage(size: base.size),
            let tiff = maskImg.tiffRepresentation,
            let rep = NSBitmapImageRep(data: tiff),
@@ -516,10 +625,68 @@ public struct InpaintCanvasView: View {
 
         Task {
             await engine.generate(request: req)
-            if case .completed(let url) = engine.status, let newImg = NSImage(contentsOf: url) {
+            if case .completed(let url, let mem) = engine.status, let newImg = NSImage(contentsOf: url) {
                 state.baseImage = newImg
                 state.strokes.removeAll()
-                modelManager.refresh() // 同步更新快取狀態
+                self.lastSavedURL = url
+                modelManager.refresh()
+
+                var msg = "🎉 重繪成功！已存至：\(url.lastPathComponent)"
+                if let m = mem {
+                    msg += " (Metal記憶體: \(m))"
+                }
+                showToast(msg)
+            }
+        }
+    }
+
+    private func saveAs() {
+        guard let img = state.baseImage,
+              let tiff = img.tiffRepresentation,
+              let rep = NSBitmapImageRep(data: tiff),
+              let pngData = rep.representation(using: .png, properties: [:]) else { return }
+
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.png, .jpeg]
+        panel.canCreateDirectories = true
+        panel.nameFieldStringValue = "Inpaint_\(selectedModel.id)_\(Int(Date().timeIntervalSince1970)).png"
+        panel.title = "另存修圖成品新檔"
+        panel.message = "請選擇儲存目的地與自訂檔案名稱"
+
+        if panel.runModal() == .OK, let url = panel.url {
+            try? pngData.write(to: url)
+            self.lastSavedURL = url
+            showToast("💾 另存新檔成功：\(url.lastPathComponent)")
+        }
+    }
+
+    private func openInFinder() {
+        if let url = lastSavedURL {
+            NSWorkspace.shared.activateFileViewerSelecting([url])
+        } else {
+            let picturesURL = FileManager.default.urls(for: .picturesDirectory, in: .userDomainMask).first!
+            let fluxDir = picturesURL.appendingPathComponent("FluxStudio")
+            NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: fluxDir.path)
+        }
+    }
+
+    private func openInPreview() {
+        guard let url = lastSavedURL else { return }
+        NSWorkspace.shared.open(url)
+    }
+
+    private func copyImageToClipboard() {
+        guard let img = state.baseImage else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.writeObjects([img])
+        showToast("📋 已複製修圖成品到剪貼簿！")
+    }
+
+    private func showToast(_ text: String) {
+        toastMessage = text
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
+            if toastMessage == text {
+                toastMessage = nil
             }
         }
     }

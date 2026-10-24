@@ -1,5 +1,6 @@
 import Foundation
 import Combine
+import AppKit
 
 public struct GenerationRequest: Sendable {
     public let model: FluxModelSpec
@@ -47,10 +48,35 @@ public struct GenerationRequest: Sendable {
     }
 }
 
-public enum ProcessStatus: Equatable {
+public struct DetailedProgress: Equatable, Sendable {
+    public let phaseTitle: String
+    public let detailMessage: String
+    public let currentStep: Int
+    public let totalSteps: Int
+    public let percent: Double
+    public let speedText: String?
+
+    public init(
+        phaseTitle: String,
+        detailMessage: String,
+        currentStep: Int = 0,
+        totalSteps: Int = 0,
+        percent: Double = 0.0,
+        speedText: String? = nil
+    ) {
+        self.phaseTitle = phaseTitle
+        self.detailMessage = detailMessage
+        self.currentStep = currentStep
+        self.totalSteps = totalSteps
+        self.percent = percent
+        self.speedText = speedText
+    }
+}
+
+public enum ProcessStatus: Equatable, Sendable {
     case idle
-    case running(step: Int, total: Int, message: String)
-    case completed(outputImageURL: URL)
+    case running(progress: DetailedProgress)
+    case completed(outputImageURL: URL, memoryUsed: String?)
     case failed(error: String)
 }
 
@@ -61,6 +87,9 @@ public class MFluxEngine: ObservableObject {
     @Published public var status: ProcessStatus = .idle
     @Published public var consoleLogs: String = ""
     @Published public var activeProcess: Process?
+
+    private var currentPhase: String = "📦 [1/4] 載入模型權重"
+    private var detectedMemory: String? = nil
 
     private var binPaths: [String] {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
@@ -98,7 +127,15 @@ public class MFluxEngine: ObservableObject {
             return
         }
 
-        self.status = .running(step: 0, total: request.steps, message: "準備啟動模型...")
+        self.currentPhase = "📦 [1/4] 載入模型權重與編譯著色器"
+        self.detectedMemory = nil
+        self.status = .running(progress: DetailedProgress(
+            phaseTitle: self.currentPhase,
+            detailMessage: "正在載入 \(request.model.label) 至 Apple Silicon 統一記憶體...",
+            currentStep: 0,
+            totalSteps: request.steps,
+            percent: 0.05
+        ))
         self.consoleLogs = ""
 
         var args: [String] = []
@@ -162,7 +199,6 @@ public class MFluxEngine: ObservableObject {
         process.executableURL = URL(fileURLWithPath: executablePath)
         process.arguments = args
 
-        // 配置環境變數（啟用 hf_transfer 高速下載，並鎖定無緩衝輸出）
         var env = ProcessInfo.processInfo.environment
         env["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
         env["HF_HUB_DISABLE_TELEMETRY"] = "1"
@@ -213,7 +249,7 @@ public class MFluxEngine: ObservableObject {
                         self.activeProcess = nil
                         if process.terminationStatus == 0 {
                             let outUrl = URL(fileURLWithPath: request.outputPath)
-                            self.status = .completed(outputImageURL: outUrl)
+                            self.status = .completed(outputImageURL: outUrl, memoryUsed: self.detectedMemory)
                         } else {
                             self.status = .failed(error: "進程退出碼異常：\(process.terminationStatus)\n\(self.consoleLogs)")
                         }
@@ -233,19 +269,70 @@ public class MFluxEngine: ObservableObject {
     }
 
     private func parseProgress(from text: String, totalSteps: Int) {
-        // 解析常見進度格式，如 1/4 或 50%
-        let pattern = #"(\d+)/(\d+)"#
+        // 1. 偵測 Peak Memory
+        if text.contains("Peak MLX memory:") {
+            let parts = text.components(separatedBy: "Peak MLX memory:")
+            if parts.count >= 2 {
+                let memStr = parts[1].trimmingCharacters(in: .whitespacesAndNewlines).components(separatedBy: "\n").first ?? ""
+                self.detectedMemory = memStr
+            }
+        }
+
+        // 2. 階段判斷
+        if text.contains("Loading") || text.contains("Initializing") || text.contains("Fetching") {
+            self.currentPhase = "📦 [1/4] 載入模型權重與編譯著色器"
+        } else if text.contains("Tokenizing") || text.contains("Encoding prompt") {
+            self.currentPhase = "🧠 [2/4] 文字特徵編碼處理中"
+        } else if text.contains("Decoding") || text.contains("Saving") || text.contains("Metadata embedded") {
+            self.currentPhase = "🖼️ [4/4] VAE 影像解碼與寫入元數據"
+        }
+
+        // 3. 步數與速度進度解析 (tqdm 格式: 1/4 [00:15<00:45, 15.2s/it])
+        let pattern = #"(\d+)/(\d+)(?:\s*\[([^\]]+)\])?"#
         if let regex = try? NSRegularExpression(pattern: pattern) {
             let nsText = text as NSString
             let matches = regex.matches(in: text, range: NSRange(location: 0, length: nsText.length))
             if let lastMatch = matches.last, lastMatch.numberOfRanges >= 3 {
                 let currentStr = nsText.substring(with: lastMatch.range(at: 1))
                 let totalStr = nsText.substring(with: lastMatch.range(at: 2))
-                if let cur = Int(currentStr), let tot = Int(totalStr) {
-                    self.status = .running(step: cur, total: tot, message: "生成中... \(cur)/\(tot)")
+
+                var speedInfo: String? = nil
+                if lastMatch.numberOfRanges >= 4 && lastMatch.range(at: 3).location != NSNotFound {
+                    speedInfo = nsText.substring(with: lastMatch.range(at: 3))
+                }
+
+                if let cur = Int(currentStr), let tot = Int(totalStr), tot > 0 {
+                    let progressPercent = min(1.0, max(0.05, Double(cur) / Double(tot)))
+                    var detail = "正在進行去噪迭代: 第 \(cur) / \(tot) 步 (\(Int(progressPercent * 100))%)"
+
+                    if let sp = speedInfo {
+                        detail += " · [\(sp)]"
+                    }
+
+                    self.currentPhase = "🎨 [3/4] 擴散去噪生成中"
+                    self.status = .running(progress: DetailedProgress(
+                        phaseTitle: self.currentPhase,
+                        detailMessage: detail,
+                        currentStep: cur,
+                        totalSteps: tot,
+                        percent: progressPercent,
+                        speedText: speedInfo
+                    ))
                     return
                 }
             }
+        }
+
+        // 如果目前沒有步數匹配，但處於運行階段，更新階段標題
+        if case .running(let old) = self.status {
+            self.status = .running(progress: DetailedProgress(
+                phaseTitle: self.currentPhase,
+                detailMessage: old.detailMessage,
+                currentStep: old.currentStep,
+                totalSteps: old.totalSteps,
+                percent: old.percent,
+                speedText: old.speedText
+            ))
         }
     }
 }

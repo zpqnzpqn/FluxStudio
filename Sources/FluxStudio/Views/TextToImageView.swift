@@ -17,8 +17,9 @@ public struct TextToImageView: View {
     @State private var lowRam: Bool = true
 
     @State private var generatedImage: NSImage?
-    @State private var isCopiedNotification: Bool = false
-    @State private var isSavedNotification: Bool = false
+    @State private var currentSavedURL: URL?
+    @State private var showConsoleLogs: Bool = false
+    @State private var toastMessage: String? = nil
 
     public init() {}
 
@@ -172,7 +173,7 @@ public struct TextToImageView: View {
 
                     Spacer()
 
-                    // 生成按鈕
+                    // 生成控制按鈕
                     Button(action: generateImage) {
                         HStack {
                             Image(systemName: "sparkles")
@@ -185,57 +186,129 @@ public struct TextToImageView: View {
 
                     if engine.activeProcess != nil {
                         Button(action: { engine.cancel() }) {
-                            Text("中斷生成")
+                            Label("中斷生成", systemImage: "xmark.circle")
                                 .foregroundColor(.red)
                         }
                         .frame(maxWidth: .infinity)
                     }
 
-                    if case .running(let step, let total, let msg) = engine.status {
-                        VStack(alignment: .leading, spacing: 4) {
-                            ProgressView(value: Double(step), total: Double(total))
-                            Text(msg).font(.caption2).foregroundColor(.secondary)
+                    // 豐富的推論進度即時展示區
+                    if case .running(let prog) = engine.status {
+                        VStack(alignment: .leading, spacing: 6) {
+                            HStack {
+                                Text(prog.phaseTitle)
+                                    .font(.subheadline)
+                                    .bold()
+                                    .foregroundColor(.accentColor)
+                                Spacer()
+                                Text("\(Int(prog.percent * 100))%")
+                                    .font(.subheadline)
+                                    .bold()
+                                    .monospacedDigit()
+                            }
+
+                            ProgressView(value: prog.percent, total: 1.0)
+                                .progressViewStyle(.linear)
+
+                            Text(prog.detailMessage)
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+
+                            Button(action: { showConsoleLogs.toggle() }) {
+                                HStack {
+                                    Text(showConsoleLogs ? "隱藏推論日誌" : "查看即時推論日誌")
+                                    Image(systemName: showConsoleLogs ? "chevron.up" : "chevron.down")
+                                }
+                                .font(.caption2)
+                            }
+                            .buttonStyle(.plain)
+                            .foregroundColor(.blue)
+
+                            if showConsoleLogs {
+                                ScrollView {
+                                    Text(engine.consoleLogs)
+                                        .font(.system(.caption2, design: .monospaced))
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                }
+                                .frame(height: 80)
+                                .background(Color.black.opacity(0.85))
+                                .foregroundColor(.green)
+                                .cornerRadius(6)
+                            }
                         }
+                        .padding(8)
+                        .background(Color.secondary.opacity(0.1))
+                        .cornerRadius(8)
                     }
                 }
                 .padding()
             }
-            .frame(minWidth: 320, maxWidth: 380)
+            .frame(minWidth: 330, maxWidth: 390)
 
-            // 右側影像預覽區
+            // 右側影像預覽與檔案儲存管理區
             ZStack {
                 Color(nsColor: .underPageBackgroundColor)
 
                 if let img = generatedImage {
-                    VStack(spacing: 14) {
+                    VStack(spacing: 12) {
                         Image(nsImage: img)
                             .resizable()
                             .aspectRatio(contentMode: .fit)
                             .cornerRadius(8)
                             .shadow(radius: 6)
-                            .padding()
+                            .padding([.top, .horizontal])
 
-                        HStack(spacing: 16) {
-                            Button(action: saveImageToDisk) {
-                                Label("儲存至圖片資料夾", systemImage: "square.and.arrow.down")
+                        // 檔案儲存資訊條與說明
+                        if let url = currentSavedURL {
+                            HStack(spacing: 8) {
+                                Image(systemName: "checkmark.circle.fill")
+                                    .foregroundColor(.green)
+                                Text("檔案已自動存檔於：")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                                Text(url.path)
+                                    .font(.caption)
+                                    .monospaced()
+                                    .bold()
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
                             }
+                            .padding(.horizontal)
+                        }
+
+                        // 功能按鍵列：另存新檔、在Finder開啟、預覽、複製
+                        HStack(spacing: 12) {
+                            Button(action: saveAs) {
+                                Label("另存新檔...", systemImage: "square.and.arrow.down.on.square")
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .help("自訂檔名與儲存目錄")
+
+                            Button(action: openInFinder) {
+                                Label("在 Finder 開啟", systemImage: "folder")
+                            }
+                            .help("打開所在圖片資料夾")
+
+                            Button(action: openInPreview) {
+                                Label("系統預覽", systemImage: "eye")
+                            }
+                            .help("在 macOS 預覽程式中打開檢視")
 
                             Button(action: copyImageToClipboard) {
-                                Label("複製到剪貼簿", systemImage: "doc.on.doc")
+                                Label("複製圖片", systemImage: "doc.on.doc")
                             }
+                            .help("複製到剪貼簿以便直接貼上")
                         }
                         .padding(.bottom, 12)
 
-                        if isCopiedNotification {
-                            Text("✅ 已複製到剪貼簿！")
+                        if let toast = toastMessage {
+                            Text(toast)
                                 .font(.caption)
-                                .foregroundColor(.green)
-                                .transition(.opacity)
-                        }
-                        if isSavedNotification {
-                            Text("✅ 已儲存至 Pictures/FluxStudio/ 並在 Finder 顯示！")
-                                .font(.caption)
-                                .foregroundColor(.green)
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 6)
+                                .background(Color.black.opacity(0.75))
+                                .foregroundColor(.white)
+                                .cornerRadius(16)
                                 .transition(.opacity)
                         }
                     }
@@ -245,7 +318,11 @@ public struct TextToImageView: View {
                             .font(.system(size: 64))
                             .foregroundColor(.secondary.opacity(0.5))
                         Text("完成的圖片將在此高解析度呈現")
+                            .font(.title3)
                             .foregroundColor(.secondary)
+                        Text("預設自動儲存於系統圖片目錄：~/Pictures/FluxStudio/")
+                            .font(.caption)
+                            .foregroundColor(.secondary.opacity(0.8))
                     }
                 }
             }
@@ -257,8 +334,11 @@ public struct TextToImageView: View {
     }
 
     private func generateImage() {
-        let tempDir = FileManager.default.temporaryDirectory
-        let outFile = tempDir.appendingPathComponent("flux_out_\(UUID().uuidString).png").path
+        let picturesURL = FileManager.default.urls(for: .picturesDirectory, in: .userDomainMask).first!
+        let fluxDir = picturesURL.appendingPathComponent("FluxStudio")
+        try? FileManager.default.createDirectory(at: fluxDir, withIntermediateDirectories: true)
+
+        let targetFile = fluxDir.appendingPathComponent("Flux_\(selectedModel.id)_\(width)x\(height)_\(Int(Date().timeIntervalSince1970)).png")
         let s = Int(seed.trimmingCharacters(in: .whitespaces))
 
         let req = GenerationRequest(
@@ -272,46 +352,73 @@ public struct TextToImageView: View {
             quantize: quantize,
             seed: s,
             lowRam: lowRam,
-            outputPath: outFile
+            outputPath: targetFile.path
         )
 
         Task {
             await engine.generate(request: req)
-            if case .completed(let url) = engine.status, let img = NSImage(contentsOf: url) {
+            if case .completed(let url, let mem) = engine.status, let img = NSImage(contentsOf: url) {
                 self.generatedImage = img
-                modelManager.refresh() // 確保快取狀態同步更新
+                self.currentSavedURL = url
+                modelManager.refresh()
+
+                var msg = "🎉 生成成功！檔案已儲存。"
+                if let m = mem {
+                    msg += " (Metal記憶體: \(m))"
+                }
+                showToast(msg)
             }
         }
     }
 
-    private func saveImageToDisk() {
+    private func saveAs() {
         guard let img = generatedImage,
               let tiff = img.tiffRepresentation,
               let rep = NSBitmapImageRep(data: tiff),
               let pngData = rep.representation(using: .png, properties: [:]) else { return }
 
-        let picturesURL = FileManager.default.urls(for: .picturesDirectory, in: .userDomainMask).first!
-        let fluxDir = picturesURL.appendingPathComponent("FluxStudio")
-        try? FileManager.default.createDirectory(at: fluxDir, withIntermediateDirectories: true)
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.png, .jpeg]
+        panel.canCreateDirectories = true
+        panel.nameFieldStringValue = "FluxStudio_\(selectedModel.id)_\(Int(Date().timeIntervalSince1970)).png"
+        panel.title = "另存圖片新檔"
+        panel.message = "請選擇儲存目的地與自訂檔案名稱"
 
-        let target = fluxDir.appendingPathComponent("Flux_\(Int(Date().timeIntervalSince1970)).png")
-        try? pngData.write(to: target)
-        NSWorkspace.shared.activateFileViewerSelecting([target])
-
-        isSavedNotification = true
-        DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
-            isSavedNotification = false
+        if panel.runModal() == .OK, let url = panel.url {
+            try? pngData.write(to: url)
+            self.currentSavedURL = url
+            showToast("💾 另存新檔成功：\(url.lastPathComponent)")
         }
+    }
+
+    private func openInFinder() {
+        if let url = currentSavedURL {
+            NSWorkspace.shared.activateFileViewerSelecting([url])
+        } else {
+            let picturesURL = FileManager.default.urls(for: .picturesDirectory, in: .userDomainMask).first!
+            let fluxDir = picturesURL.appendingPathComponent("FluxStudio")
+            NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: fluxDir.path)
+        }
+    }
+
+    private func openInPreview() {
+        guard let url = currentSavedURL else { return }
+        NSWorkspace.shared.open(url)
     }
 
     private func copyImageToClipboard() {
         guard let img = generatedImage else { return }
         NSPasteboard.general.clearContents()
         NSPasteboard.general.writeObjects([img])
+        showToast("📋 已複製圖片到剪貼簿！")
+    }
 
-        isCopiedNotification = true
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
-            isCopiedNotification = false
+    private func showToast(_ text: String) {
+        toastMessage = text
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
+            if toastMessage == text {
+                toastMessage = nil
+            }
         }
     }
 }
