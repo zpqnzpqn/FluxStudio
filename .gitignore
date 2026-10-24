@@ -1,0 +1,10 @@
+.DS_Store
+/.build/
+/.build.nosync/
+/tmp/
+*.swp
+*~
+*.xcodeproj
+xcuserdata/
+DerivedData/
+.swiftpm/
